@@ -1,0 +1,207 @@
+#!/bin/sh
+
+#
+# crystal_musl -- a wrapper for the crystal compiler that will:
+#
+#   (1) compile a crystal program
+#   (2) statically link it with musl and dependent libraries that have been
+#       built with musl
+#
+#   TODO: 
+#     - Support other compiler options like verbose + passing additional
+#       options to the linker
+#
+
+################## https://github.com/mkropat/sh-realpath #####################
+#
+# The MIT License (MIT)
+#
+# Copyright (c) 2014 Michael Kropat
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+echo_and_exec() { echo "\$ $@" ; exec "$@" ; }
+
+realpath() {
+    canonicalize_path "$(resolve_symlinks "$1")"
+}
+
+resolve_symlinks() {
+    _resolve_symlinks "$1"
+}
+
+_resolve_symlinks() {
+    _assert_no_path_cycles "$@" || return
+
+    local dir_context path
+    path=$(readlink -- "$1")
+    if [ $? -eq 0 ]; then
+        dir_context=$(dirname -- "$1")
+        _resolve_symlinks "$(_prepend_dir_context_if_necessary "$dir_context" "$path")" "$@"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+_prepend_dir_context_if_necessary() {
+    if [ "$1" = . ]; then
+        printf '%s\n' "$2"
+    else
+        _prepend_path_if_relative "$1" "$2"
+    fi
+}
+
+_prepend_path_if_relative() {
+    case "$2" in
+        /* ) printf '%s\n' "$2" ;;
+         * ) printf '%s\n' "$1/$2" ;;
+    esac
+}
+
+_assert_no_path_cycles() {
+    local target path
+
+    target=$1
+    shift
+
+    for path in "$@"; do
+        if [ "$path" = "$target" ]; then
+            return 1
+        fi
+    done
+}
+
+canonicalize_path() {
+    if [ -d "$1" ]; then
+        _canonicalize_dir_path "$1"
+    else
+        _canonicalize_file_path "$1"
+    fi
+}
+
+_canonicalize_dir_path() {
+    (cd "$1" 2>/dev/null && pwd -P)
+}
+
+_canonicalize_file_path() {
+    local dir file
+    dir=$(dirname -- "$1")
+    file=$(basename -- "$1")
+    (cd "$dir" 2>/dev/null >/dev/null && printf '%s/%s\n' "$(pwd -P)" "$file")
+}
+
+##############################################################################
+
+SCRIPT_DIR="$(dirname "$(realpath "$0" || echo "$0")")"
+ROOT_DIR="$SCRIPT_DIR/.."
+
+export CRYSTAL_PATH="${CRYSTAL_PATH:-"$ROOT_DIR/share/crystal/src:lib"}"
+export PATH="$ROOT_DIR/lib/crystal/bin:$PATH"
+
+crystal_cmd="$1"
+
+# If we're not building a binary, do exactly what the standard crystal wrapper
+# does
+if [ "$crystal_cmd" != build ]; then
+  export LIBRARY_PATH="$ROOT_DIR/lib/crystal/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+  exec "$ROOT_DIR/lib/crystal/bin/crystal" "${@}"
+fi
+
+# If we're here, that means we ran `crystal_musl build ...`. Set the LIBRARY_PATH
+# to ../lib/crystal_musl not ../lib/crystal
+export LIBRARY_PATH="$ROOT_DIR/lib/crystal_musl/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+
+# Set CC to musl-gcc unless it has already been set to some other musl cc wrapper
+if [ x"$CC" = x ]; then
+  export CC=musl-gcc
+fi
+
+# Set our triplet explicitly. TODO: we could set it if it has not been set
+triplet=$( $CC -dumpmachine )
+triplet=${triplet%-gnu}-musl
+
+
+### If we did not pass --static or --cross-compile as options, add them to $EXTRA_OPTS
+static_set=0
+cross_compile_set=0
+
+for opt in $@; do
+  case "$opt" in
+    --static) static_set=1;;
+    --cross-compile) cross_compile_set=1;;
+    *) : ;;
+  esac
+done
+
+EXTRA_OPTS=""
+if [ "$static_set" = "0" ]; then
+  EXTRA_OPTS="$EXTRA_OPTS --static"
+fi
+
+if [ "$cross_compile_set" = "0" ]; then
+  EXTRA_OPTS="$EXTRA_OPTS --cross-compile"
+fi
+
+# We build our binary in 2 steps ...
+# Step 1: Run the crystal compiler to generate an object file
+"$ROOT_DIR/lib/crystal/bin/crystal" "${@}" --target="$triplet" $EXTRA_OPTS
+crystal_ret=$?
+
+if [ $crystal_ret -ne 0 ]; then
+  echo "Error running crystal. Exit code was $crystal_ret"
+  exit $crystal_ret
+fi
+
+# Step 2: statically-link our object file with all library archives that have been statically compiled using musl
+OPTIONS="dD:f:ho:spt"
+LONG_OPTS="cross-compile,no-debug,lto:,define:,emit:,format:,error-trace,help,ll,link-flags:,mcpu:,mattr:,no-color,no-codegen,prelude:,release,stats,progress,time,single-module,threads:,target:,verbose,static,stdin-filename:"
+
+orig_args="$@"
+options=$(getopt --options="$OPTIONS" --longoptions="$LONG_OPTS" -- "$@")
+
+source_file=''
+output_file=''
+end_opts=0
+
+eval set -- "$options"
+
+# TODO: support additional linker params
+while [ $# -gt 0 ]; do
+  k="$1"
+  case $k in
+    -o) output_file="$2"; shift;;
+    build) : ;;
+    --) end_opts="1" ;;
+    *) if [ "$end_opts" = "1" ]; then source_file="$1"; break; fi;;
+  esac
+  shift
+done
+
+if [ -z "$output_file" ]; then
+  output_file="${source_file%.cr}"
+fi
+object_file="${output_file}.o"
+
+# Now statically link the object file and the library archives into our output binary
+echo "^^^ is the linking command that was suggested by the crystal compiler. NOT running this..."
+echo
+echo "Instead, we are statically linking with musl using:"
+echo_and_exec ${CC} "$object_file" -o "$output_file" -static \
+    -levent -lpcre -lrt -lgc -lpthread -lcrystal \
+    -L"${ROOT_DIR}/lib/crystal_musl" -L"/usr/lib" -L"/usr/local/lib"
