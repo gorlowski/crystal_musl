@@ -2,12 +2,43 @@
 
 ## What is it?
 
-A wrapper for the crystal compiler to automate the process of building
-crystal programs and statically-linking them with musl and native
-libraries that have been built with musl.
+A wrapper for the [crystal compiler](https://crystal-lang.org/) to automate the
+process of building crystal programs and statically-linking them with musl and
+native libraries that have been built with [musl](https://www.musl-libc.org/).
 
 This has only been used/tested on a `x86_64-linux-gnu` system with
 crystal 0.27.
+
+## Usage
+
+Assuming you have the following code in `hello.cr`:
+
+```crystal
+  puts "Hello World!"
+```
+
+You can compile it with:
+
+```bash
+$ crystal_musl build hello.cr     # or crystal_musl -o my_static_hello_world hello.cr
+```
+
+This will produce a `hello` executable binary that is statically-linked against
+musl and the handful of native libraries that need to be linked to produce
+an executable crystal program.
+
+```bash
+# Using ldd, you can see that the executable is statically-linked
+$ ldd hello
+    not a dynamic executable
+
+# The gratuitous trial run
+$ ./hello
+HELLO WORLD!
+```
+
+You can also use the standard crystal compiler flags like `--release`,
+`--no-debug`, etc.
 
 ## Why?
 
@@ -15,7 +46,7 @@ I wanted to see if it was possible to set up a build environment on my machine
 to create statically-linked programs with crystal without having to build them
 in a vm or a container (e.g., in alpine linux using docker) to simplify the
 process of deploying a couple simple crystal utilities to low-resource machines
-that are not my primary development machine. 
+that are not my primary development machine. So far so good.
 
 ## Dependencies
 
@@ -30,20 +61,24 @@ that are not my primary development machine.
 (1) First install crystal. The scripts only work if the user running the
     scripts has write access to the folder where crystal is installed.
 
-    I suggest installing crystal somewhere in your $HOME from the binary
-    tarball for your platform that is provided on their project page.
+I suggest installing crystal somewhere in your $HOME from the binary
+tarball for your platform that is provided on their project page.
 
-    If you want to install this to a separate directory, you can explicitly set
-    the installation PREFIX prior to compiling and installing the library
-    dependencies. By default, the Makefile will look for a `crystal` executable
-    on the path, get the absolute path, infer the crystal installation root
-    from there, and then install its parts in there. It does not overwrite
-    any parts of a core crystal installation.
+If you want to install this to a separate directory, you can explicitly set
+the installation PREFIX prior to compiling and installing the library
+dependencies. By default, the Makefile will look for a `crystal` executable
+on the path, get the absolute path, infer the crystal installation root
+from there, and then install its parts in there. It does not overwrite
+any parts of a core crystal installation.
 
 (2) You need to have musl installed on your machine. You should also install
     a wrapper for gcc that compiles with musl. On debian (and probably other
     debian-based distros), you can just install the `musl`, `musl-tools`,
-    and `musl-dev` packages. I have only used this on debian buster.
+    and `musl-dev` packages. I have only used this on debian buster. If your
+    linux distribution does not have packages for a musl gcc wrapper, you
+    can use the [musl-cross](https://bitbucket.org/GregorR/musl-cross) project,
+    although you probably want to try to find a recent fork that installs
+    newer versions of musl and gcc.
 
 (3) Use the provided `Makefile` to download, compile, and install all libraries
     on which crystal programs depend using musl.
@@ -78,23 +113,6 @@ When you run `make build`, the Makefile will compile `libgc`, `libpcre`, and
 `libevent`, and these will be installed to `CRYSTAL_ROOT/lib/crystal_musl`
 when you run `make install`. The latter target will also install
 `CRYSTAL_ROOT/bin/crystal_musl`
-
-## Usage
-
-Assuming you have the following code in `hello.cr`:
-
-```crystal
-  puts "Hello World!"
-```
-
-You can compile it with:
-
-```bash
-crystal_musl build hello.cr     # or crystal_musl -o my_static_hello_world hello.cr
-```
-
-You can also use the standard crystal compiler flags like `--release`,
-`--no-debug`, etc.
 
 ## How does it work?
 
